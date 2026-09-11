@@ -5063,7 +5063,8 @@ const A8_PRODUCT_IMAGES = {
   function a8Rand(min, max) { return min + Math.random() * (max - min); }
   function a8RandInt(min, max) { return Math.floor(a8Rand(min, max + 1)); }
   function a8Pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-  function a8Fmt(n) { return Math.round(n).toLocaleString('ru-RU') + ' ₽'; }
+  function a8Num(n){ const x=Number(String(n??'').replace(/[^0-9-]/g,'')); return Number.isFinite(x)?Math.round(x):0; }
+  function a8Fmt(n){ return a8Num(n).toLocaleString('ru-RU')+' ₽'; }
 
   /* ============ SOUND + HAPTICS ============
      No audio files — clicks/deal chimes are synthesized with the Web Audio
@@ -5457,7 +5458,7 @@ const A8_PRODUCT_IMAGES = {
     'parcelHistory', 'balance', 'sellers',
     'chats', 'messages', 'clockMinutes', 'clockDay', 'asleep', 'unread',
     'bank', 'settings', 'myAddress', 'myAddressCity', 'skills',
-    'mail', 'pugi', 'mailSeeded'
+    'mail', 'pugi', 'mailSeeded', '__a8TimeMsg'
   ];
   function a8SaveState() {
     if (window.__a8Resetting) return;
@@ -5540,6 +5541,29 @@ const A8_PRODUCT_IMAGES = {
     if (fresh.length) a8State.listings = a8State.listings.concat(fresh);
   }
   if (a8LoadState()) a8MergeNewProductListings();
+
+  // A refresh during the sleep fade must never restore a locked "asleep"
+  // state. If the previous sleep had already advanced the clock to 13:00,
+  // simply unlock it; if it was saved before the wake-up step, finish that
+  // transition here.
+  if (a8State.asleep) {
+    /* The sleep transition may have been saved while the screen was fading.
+       Preserve the OLD game timestamp so the elapsed-message engine can see
+       the whole sleep interval after reload instead of treating 13:00 as the
+       new starting point. */
+    const __a8SleepResumeBefore = Number(a8State.clockDay || 1) * 1440 + Number(a8State.clockMinutes || 0);
+    if (Number(a8State.clockMinutes) !== 13 * 60) {
+      a8State.clockMinutes = 13 * 60;
+      a8State.clockDay = Number(a8State.clockDay || 1) + 1;
+      try { a8AdvanceMarketDay(); } catch (e) {}
+    }
+    if (!a8State.__a8TimeMsg || typeof a8State.__a8TimeMsg !== 'object') a8State.__a8TimeMsg = {};
+    /* Tell the later message module exactly where the sleep started. */
+    a8State.__a8TimeMsg.lastAbs = __a8SleepResumeBefore;
+    a8State.__a8TimeMsg.carry = Number(a8State.__a8TimeMsg.carry) || 0;
+    a8State.asleep = false;
+    try { a8SaveState(); } catch (e) {}
+  }
   function a8ApplyHiddenProductCharacteristics() {
     const poolByCat = {
       phones: ['слабый аккумулятор', 'неоригинальный дисплей', 'восстановлен после ремонта', 'не работает Face ID'],
@@ -6365,7 +6389,10 @@ const A8_PRODUCT_IMAGES = {
       if (mode !== 'buy') {
         chat.started = true;
         const descFactor = l.descBonus || 1.0;
-        const buyerOffer = Math.min(l.price, Math.max(chat.floor, Math.round(l.price * a8Rand(0.65, 0.9) * descFactor / 10) * 10));
+        /* Base the opening offer on market value, never the listing's own
+           asking price (which could make this literally offer 0 ₽). */
+        const marketBasis = Math.max(10, Number(l.marketMid || l.marketMax || l.marketMin) || 0);
+        const buyerOffer = Math.max(10, Math.round(marketBasis * a8Rand(0.65, 0.9) * descFactor / 10) * 10);
         chat.current = buyerOffer; chat.dealPrice = buyerOffer;
         a8PushMsg(chat, 'bot', a8Pick(A8_BUYER_OPENERS).replace('{title}', l.title).replace('{price}', a8Fmt(buyerOffer)));
       }
@@ -6473,7 +6500,7 @@ const A8_PRODUCT_IMAGES = {
         return;
       }
       if (chat.awaitingInspectionChoice) {
-        chips += '<div class="a8-quick-chip deal" onclick="SelfPickupModule.openInspectionChoiceModal(\'' + l.id + '\')">Как поступим с товаром?</div>';
+        chips += '<div class="a8-quick-chip deal" onclick="SelfPickupModule.selectDelivery(\'' + l.id + '\')">Как поступим с товаром?</div>';
         chatQuickEl.innerHTML = chips;
         return;
       }
@@ -7183,8 +7210,9 @@ const A8_PRODUCT_IMAGES = {
   });
   function a8SubmitOffer() {
     const input = document.getElementById('a8-chat-offer-input');
-    const val = Math.round(parseFloat(input.value));
-    if (!val || val <= 0) { input.focus(); return; }
+    const raw = String(input.value || '').replace(/[^0-9]/g, '');
+    const val = Math.round(Number(raw));
+    if (!Number.isFinite(val) || val <= 0) { input.focus(); return; }
     a8CloseOfferInput();
     if (!a8ChatCtx) return;
     const l = a8FindListing(a8ChatCtx.listingId);
@@ -7231,31 +7259,14 @@ const A8_PRODUCT_IMAGES = {
     const bank = l.botType === 'shark' ? A8_HAGGLE_SHARK_REJECT : l.botType === 'naive' ? A8_HAGGLE_NAIVE_REJECT : l.botType === 'granny' ? A8_HAGGLE_GRANNY_REJECT : A8_HAGGLE_CHILL_REJECT;
     a8PushMsg(chat, 'bot', a8Pick(bank).replace('{price}', a8Fmt(counter)));
   }
-  function a8HandleSellOffer(chat, l, val) {
-    a8PushMsg(chat, 'me', 'Отдам за ' + a8Fmt(val) + '.');
-    // Жёсткий потолок: игрок не может запросить больше чем 3x от своей цены
-    const maxAsk = Math.round(l.price * 3 / 10) * 10;
-    if (val > maxAsk) {
-      a8PushMsg(chat, 'bot', 'Вы серьёзно? ' + a8Fmt(val) + '? Это в ' + (val / l.price).toFixed(1) + ' раза дороже, чем вы просили. Нет, так не пойдёт.');
-      return;
-    }
-    const liq = l.liquidity || 1.0;
-    if (val <= chat.current) {
-      const accept = Math.random() < 0.85 * liq;
-      chat.dealPrice = val;
-      a8PushMsg(chat, 'bot', accept ? a8Pick(A8_BUYER_ACCEPT).replace('{price}', a8Fmt(val)) : a8Pick(A8_BUYER_HESITATE));
-      return;
-    }
-    const gap = (val - chat.current) / Math.max(1, l.price);
-    const acceptChance = Math.max(0.05, 0.65 - gap * 2) * liq;
-    if (Math.random() < acceptChance) {
-      chat.dealPrice = val;
-      a8PushMsg(chat, 'bot', a8Pick(A8_BUYER_ACCEPT).replace('{price}', a8Fmt(val)));
-    } else {
-      const counter = Math.round((chat.current + val) / 2 / 10) * 10;
-      chat.current = counter;
-      a8PushMsg(chat, 'bot', a8Pick(A8_BUYER_COUNTER).replace('{price}', a8Fmt(counter)));
-    }
+  function a8HandleSellOffer(chat,l,val){
+    val=a8Num(val); l.price=a8Num(l.price); chat.current=a8Num(chat.current||l.price);
+    /* Wording fix: player is the seller here, not the buyer. */
+    a8PushMsg(chat,'me','Уступлю за '+a8Fmt(val)+'.');
+    if(val<Math.round(l.price*0.7/10)*10){a8PushMsg(chat,'bot','Цена слишком низкая.');return;}
+    if(val>=chat.current){chat.dealPrice=val;chat.current=val;a8PushMsg(chat,'bot',a8Pick(A8_BUYER_ACCEPT).replace('{price}',a8Fmt(val)));return;}
+    const counter=Math.round(((chat.current+val)/2)/10)*10; chat.current=counter;
+    a8PushMsg(chat,'bot',a8Pick(A8_BUYER_COUNTER).replace('{price}',a8Fmt(counter)));
   }
 
   /* ---- Messages tab: shows active negotiation threads ---- */
@@ -7267,16 +7278,14 @@ const A8_PRODUCT_IMAGES = {
     document.getElementById('a8-msg-empty').style.display = allThreads.length ? 'none' : 'flex';
 
     let html = '';
-    if (buyThreads.length) {
-      html += '<div class="a8-msg-section-title">🛒 Покупаю</div>';
-      html += buyThreads.map(c => a8MsgThreadHTML(c)).join('');
-    }
-    if (sellThreads.length) {
-      html += '<div class="a8-msg-section-title">💼 Продаю</div>';
-      html += sellThreads.map(c => a8MsgThreadHTML(c)).join('');
+    if (allThreads.length) {
+      html += '<div class="a8-msg-section-title">💬 Все чаты</div>';
+      html += allThreads.map(c => a8MsgThreadHTML(c)).join('');
     }
     listEl.innerHTML = html;
     a8InitSwipeRows();
+    const ml=document.getElementById('a8-msg-list');
+    if(ml&&!ml.dataset.delBound){ml.dataset.delBound=1;ml.addEventListener('click',e=>{const b=e.target.closest('.a8-swipe-delete');if(b){e.stopPropagation();a8DeleteChat(b.dataset.chatKey);}});}
   }
 
   function a8MsgThreadHTML(c) {
@@ -7286,7 +7295,7 @@ const A8_PRODUCT_IMAGES = {
     const key = c.listingId + ':' + c.mode;
     const modeLabel = c.mode === 'buy' ? 'Покупка' : 'Продажа';
     return '<div class="a8-swipe-row">' +
-      '<button class="a8-swipe-delete" onclick="a8DeleteChat(\'' + key + '\')">Удалить</button>' +
+      '<button class="a8-swipe-delete" data-chat-key="' + key + '">Удалить</button>' +
       '<div class="a8-swipe-content a8-mylist-card" style="cursor:pointer;" onclick="a8OpenChat(\'' + l.id + '\',\'' + c.mode + '\')">' +
         '<div class="a8-mylist-thumb">' + a8Visual(l.cat, 22, l.emoji, l.sourceFile) + '</div>' +
         '<div class="a8-mylist-info"><div class="a8-mylist-title">' + l.title + '</div><div class="a8-cart-price" style="color:rgba(255,255,255,0.5);">' + (last ? last.text.slice(0, 40) : '') + '</div><div style="font-size:11px;color:rgba(255,255,255,0.35);margin-top:2px;">' + modeLabel + '</div></div>' +
@@ -7295,31 +7304,76 @@ const A8_PRODUCT_IMAGES = {
   }
 
   function a8DeleteChat(key) {
+    key=String(key);
+    if (!a8State.chats[key]) return;
     delete a8State.chats[key];
+    if (a8ChatCtx && (a8ChatCtx.listingId + ':' + a8ChatCtx.mode) === key) a8CloseChat();
+    /* BUGFIX: a8Save() never existed anywhere in this file, so the delete
+       was never actually persisted — the chat reappeared after a reload
+       because a8SaveState() (the real, only save function) was never
+       called. */
+    try { if (typeof a8SaveState === 'function') a8SaveState(); } catch (e) {}
     a8RenderMessages();
+  }
+
+  function a8SwipeDeleteRow(content) {
+    var wrap = (content.closest && content.closest('.a8-swipe-row')) || content;
+    var key = content.getAttribute('data-a8-open-chat') || content.getAttribute('data-chat-key') || wrap.getAttribute('data-a8-chat-key');
+    content.style.transition = 'transform 0.22s ease, opacity 0.22s ease';
+    content.style.transform = 'translateX(-100%)';
+    content.style.opacity = '0';
+    wrap.style.overflow = 'hidden';
+    wrap.style.maxHeight = wrap.offsetHeight + 'px';
+    wrap.style.transition = 'max-height 0.2s ease 0.08s, margin 0.2s ease 0.08s, padding 0.2s ease 0.08s';
+    requestAnimationFrame(function () {
+      wrap.style.maxHeight = '0px';
+      wrap.style.marginTop = '0px'; wrap.style.marginBottom = '0px';
+      wrap.style.paddingTop = '0px'; wrap.style.paddingBottom = '0px';
+    });
+    setTimeout(function () {
+      if (key && window.a8State && a8State.chats && a8State.chats[key]) {
+        delete a8State.chats[key];
+        try { if (typeof a8ChatCtx !== 'undefined' && a8ChatCtx && (a8ChatCtx.listingId + ':' + a8ChatCtx.mode) === key) a8CloseChat(); } catch (e) {}
+        /* BUGFIX: a8Save/saveGame never existed — nothing was ever persisted
+           here, so a swipe-deleted chat silently came back after leaving and
+           reopening the game. a8SaveState() is the actual save function. */
+        try { if (typeof a8SaveState === 'function') a8SaveState(); } catch (e) {}
+      }
+      if (typeof window.a8RenderMessages === 'function') window.a8RenderMessages();
+      else if (wrap && wrap.remove) wrap.remove();
+    }, 260);
   }
 
   function a8InitSwipeRows() {
     document.querySelectorAll('#a8-msg-list .a8-swipe-content').forEach(function(row) {
-      let startX = 0, startY = 0, curX = 0, dragging = false, decided = false, isHorizontal = false;
-      const MAX = 76;
+      let startX = 0, startY = 0, curX = 0, dragging = false, decided = false, isHorizontal = false, width = 0, deleted = false;
       row.addEventListener('touchstart', function(e) {
-        startX = e.touches[0].clientX; startY = e.touches[0].clientY; curX = 0; dragging = true; decided = false; isHorizontal = false;
+        startX = e.touches[0].clientX; startY = e.touches[0].clientY; curX = 0; dragging = true; decided = false; isHorizontal = false; deleted = false;
+        width = row.getBoundingClientRect().width || row.offsetWidth || 300;
         row.classList.add('dragging');
       }, { passive:true });
       row.addEventListener('touchmove', function(e) {
-        if (!dragging) return;
+        if (!dragging || deleted) return;
         const dx = e.touches[0].clientX - startX;
         const dy = e.touches[0].clientY - startY;
         if (!decided) { isHorizontal = Math.abs(dx) > Math.abs(dy); decided = true; }
         if (!isHorizontal) return;
-        curX = Math.max(-MAX, Math.min(0, dx));
+        curX = Math.max(-width, Math.min(0, dx));
         row.style.transform = 'translateX(' + curX + 'px)';
+        row.style.opacity = String(Math.max(0.15, 1 - Math.abs(curX) / width));
       }, { passive:true });
       row.addEventListener('touchend', function() {
         dragging = false;
         row.classList.remove('dragging');
-        row.style.transform = curX < -MAX / 2 ? 'translateX(-' + MAX + 'px)' : 'translateX(0)';
+        if (deleted) return;
+        const threshold = width * 0.28;
+        if (isHorizontal && curX <= -threshold) {
+          deleted = true;
+          a8SwipeDeleteRow(row);
+        } else {
+          row.style.transform = 'translateX(0)';
+          row.style.opacity = '1';
+        }
       });
     });
   }
@@ -7854,7 +7908,11 @@ const A8_PRODUCT_IMAGES = {
       chat.started = true;
       const factor = A8_BOT_FACTOR[l.botType];
       const descFactor = l.descBonus || 1.0;
-      const buyerOffer = Math.min(l.price, Math.max(chat.floor, Math.round(l.price * a8Rand(0.65, 0.92) * descFactor / 10) * 10));
+      /* Wording/logic fix: price offers must be based on the item's market
+         value, never the seller's asking price — using l.price here could
+         also literally floor out at 0 ₽ if the listing price was 0. */
+      const marketBasis = Math.max(10, Number(l.marketMid || l.marketMax || l.marketMin) || 0);
+      const buyerOffer = Math.max(10, Math.round(marketBasis * a8Rand(0.65, 0.92) * descFactor / 10) * 10);
       chat.current = buyerOffer; chat.dealPrice = buyerOffer;
       const opener = a8Pick(A8_BUYER_OPENERS).replace('{title}', l.title).replace('{price}', a8Fmt(buyerOffer));
       a8PushMsg(chat, 'bot', opener);
@@ -7921,12 +7979,9 @@ const A8_PRODUCT_IMAGES = {
     }
     a8UpdateClockUI();
     a8CheckAllCrossCityMeetingDeadlines();
-    a8State.buyerTimer += minPerTick;
-    if (a8State.buyerTimer >= a8State.nextBuyerIn) {
-      a8State.buyerTimer = 0;
-      a8State.nextBuyerIn = a8RandInt(15, 70);
-      if (a8State.myListings.length && Math.random() < 0.7) a8SpawnBuyerMessage(false);
-    }
+    /* Buyer messages are generated by the explicit sleep/calendar rules below.
+       Do not generate random buyers from the real-time clock tick. */
+    a8State.buyerTimer = 0;
     Object.values(a8State.chats || {}).forEach(function(chat) {
       if (!chat || chat.mode !== 'sell' || !chat.salePickupScheduled || chat.saleCheckDone) return;
       const nowAbs = a8State.clockDay * 1440 + a8State.clockMinutes;
@@ -7946,29 +8001,54 @@ const A8_PRODUCT_IMAGES = {
   setInterval(a8ClockTick, 1000);
 
   function a8GoToSleep() {
-    if (a8State.asleep) return;
+    if (a8State.asleep || window.__a8SleepRunning) return;
     const h = Math.floor(a8State.clockMinutes / 60) % 24;
     if (!(h >= 22 || h < 13)) return;
+
+    window.__a8SleepRunning = true;
     a8State.asleep = true;
-    document.getElementById('a8-sleep-btn').disabled = true;
+    const sleepBtn = document.getElementById('a8-sleep-btn');
+    if (sleepBtn) sleepBtn.disabled = true;
     const fade = document.getElementById('a8-sleep-fade');
-    fade.classList.add('on');
-    setTimeout(() => {
-      a8State.clockMinutes = 13 * 60;
-      a8State.clockDay++;
-      a8AdvanceMarketDay();
+    if (!fade) {
+      // Never leave the game locked if the fade layer is missing.
+      a8State.asleep = false;
+      window.__a8SleepRunning = false;
       a8UpdateClockUI();
-      const rolls = a8RandInt(1, Math.max(1, Math.min(4, a8State.myListings.length)));
+      return;
+    }
+
+    fade.classList.add('on');
+
+    // The wake-up phase is deliberately protected: an exception from a
+    // buyer/message/market update must never leave the black fade on screen.
+    setTimeout(() => {
       let spawned = 0;
-      for (let i = 0; i < rolls; i++) { if (a8SpawnBuyerMessage(true)) spawned++; }
-      setTimeout(() => {
+      try {
+        a8State.clockMinutes = 13 * 60;
+        a8State.clockDay++;
+        a8AdvanceMarketDay();
+
+        // Buyer messages are generated by the elapsed-game-time accumulator below.
+        spawned = 0;
+      } catch (e) {
+        // Even if a secondary morning action fails, the player must wake up.
+        a8State.clockMinutes = 13 * 60;
+      } finally {
+        // Remove the black layer FIRST, then unlock the game.
         fade.classList.remove('on');
         a8State.asleep = false;
+        window.__a8SleepRunning = false;
         a8UpdateClockUI();
         document.querySelectorAll('.overlay').forEach(o => o.classList.remove('active'));
-        if (spawned > 0) a8Toast('Утро! Пока вы спали, пришло сообщений: ' + spawned);
-        else a8Toast('Доброе утро! Пока никто не написал.');
-      }, 300);
+        try { a8SaveState(); } catch (e) {}
+        setTimeout(() => {
+          try {
+            if (spawned > 0) a8Toast('Утро! Пока вы спали, пришло сообщений: ' + spawned);
+            else a8Toast('Доброе утро! Пока никто не написал.');
+          } catch (e) {}
+        }, 50);
+      }
     }, 1300);
   }
 
@@ -9564,18 +9644,20 @@ const A8_PRODUCT_IMAGES = {
     const text = document.getElementById('pugi-travel-text');
     text.textContent = site === 'avis' ? 'В полёте...' : 'Поезд в пути...';
 
-    // Самолёт почти всегда укладывается в сутки, поезд может занять несколько дней —
-    // пропускаем целые игровые дни (та же механика, что и у сна) и спавним сообщения
-    // от покупателей за пропущенное время.
-    const daysToSkip = Math.max(1, Math.ceil(minutes / 1440));
+    // Travel advances the game clock by the actual travel duration. Messages
+    // are then calculated from the elapsed game minutes (5 per 24h).
+    const travelStartAbs = Number(a8State.clockDay || 1) * 1440 + Number(a8State.clockMinutes || 0);
+    const totalAbs = travelStartAbs + Math.max(0, Number(minutes) || 0);
+    const newDay = Math.floor(totalAbs / 1440);
+    a8State.clockDay = newDay;
+    a8State.clockMinutes = totalAbs - newDay * 1440;
     let spawned = 0;
-    for (let i = 0; i < daysToSkip; i++) {
-      a8State.clockDay++;
-      a8AdvanceMarketDay();
-      const rolls = a8RandInt(1, Math.max(1, Math.min(4, a8State.myListings.length)));
-      for (let j = 0; j < rolls; j++) { if (a8SpawnBuyerMessage(true)) spawned++; }
-    }
-    a8State.clockMinutes = (9 + a8RandInt(0, 4)) * 60;
+    try { if (typeof window.__a8ProcessElapsedMessages === 'function') {
+      const st = a8State.__a8TimeMsg || (a8State.__a8TimeMsg = {});
+      st.lastAbs = travelStartAbs;
+      spawned = window.__a8ProcessElapsedMessages();
+    }} catch(e) {}
+    a8AdvanceMarketDay();
     a8State.myCity = to;
     A8_MY_CITY = to;
     a8UpdateClockUI();
@@ -11272,13 +11354,7 @@ document.addEventListener('DOMContentLoaded', function() {
   function safeItem(id){return typeof a8FindListing==='function'?a8FindListing(id):null}
 
   /* Reset: clear every storage namespace, not only the game's key. */
-  window.a8ConfirmReset=function(){
-    window.__a8Resetting=true;
-    try{localStorage.clear()}catch(e){}
-    try{sessionStorage.clear()}catch(e){}
-    try{indexedDB.databases&&indexedDB.databases().then(ds=>ds.forEach(db=>db&&indexedDB.deleteDatabase(db.name)))}catch(e){}
-    location.reload();
-  };
+  
 
   /* Date mask: __.__.____, digits only, dots inserted automatically, real calendar validation. */
   window.a8InstallBirthMask=function(input){
@@ -11337,8 +11413,8 @@ document.addEventListener('DOMContentLoaded', function() {
     if(a8State.createCondition&&ORDER.indexOf(a8State.createCondition)<ORDER.indexOf(actual)){a8State.createCondition=actual}
   };
   window.a8SetCreateCondition=function(k){const it=a8State.createSelectedItem;if(!it)return;const ai=ORDER.indexOf(it.condition||'good'),ki=ORDER.indexOf(k);if(ki<ai){a8Toast('Нельзя искусственно ухудшить состояние');return}a8State.createCondition=k;a8RenderCreateStep()};
-  window.a8SetCreateType=function(replica){a8State.createIsReplica=!!replica;a8RenderCreateStep()};
-  window.a8SelectCreateItem=function(idx){a8State.createSelectedItem=a8State.inventory[idx];a8State.createSelectedItemIdx=idx;a8State.createIsReplica=a8State.createSelectedItem.isReplica===true;a8State.createCondition=a8State.createSelectedItem.condition||'good';a8State.createDescDraft='';a8RenderCreateStep()};
+  
+  
   window.a8PublishListing=function(){
     const it=a8State.createSelectedItem, priceEl=document.getElementById('a8-create-price');if(!it||!priceEl)return;const price=Math.round(parseFloat(priceEl.value));if(!price||price<=0){a8Toast('Укажите цену');return}
     const cap=Math.max(10, Number(a8CreatePriceCap(it))||0);
@@ -11637,13 +11713,7 @@ document.addEventListener('DOMContentLoaded', function() {
     c.meetingResolved=true;c.awaitingMeetingTravel=false;
     if(typeof window.__a8PickupNotify==='function')window.__a8PickupNotify(id);
   }
-  window.__finalPurchaseDeal=function(id){
-    const l=safe(id);if(!l)return;const c=a8GetChat(l,'buy');
-    document.getElementById('meeting-interface')?.remove();
-    const m=document.createElement('div');m.id='meeting-interface';m.className='meeting-interface open';
-    m.innerHTML='<div class="deal-final"><div class="deal-final-head"><span>Сделка</span><span>🤝</span></div><div class="deal-final-card"><div class="deal-final-photo">'+a8Visual(l.cat,30,l.emoji,l.sourceFile)+'</div><div class="deal-final-seller">'+(l.sellerName||'Продавец')+'</div><div class="deal-final-title">'+l.title+' · '+a8Fmt(c.dealPrice||l.price)+'</div></div><div class="deal-final-actions"><button class="deal-check" onclick="window.__finalChooseChecks(\''+id+'\')">Проверить товар</button><button class="deal-buy" onclick="window.__finalBuyNoCheck(\''+id+'\')">Купить без проверки</button><button class="deal-cancel" onclick="window.__finalDecline(\''+id+'\')">Отказаться</button></div></div>';
-    document.body.appendChild(m);
-  };
+  
   function checkKindLabel(l,kind){
     if(kind==='auth')return isIphone(l)?['Проверяем корпус','Проверяем серийный номер','Проверяем детали','Сверяем маркировку','Фиксируем результат']:['Проверяем логотип','Проверяем бирки','Проверяем маркировку','Сверяем материалы','Фиксируем результат'];
     if(l.cat==='auto')return ['Проверяем кузов','Проверяем двигатель','Проверяем пробег','Проверяем документы','Фиксируем результат'];
@@ -11676,12 +11746,7 @@ document.addEventListener('DOMContentLoaded', function() {
       p.querySelector('button').onclick=()=>window.__finalCheckResult(id,kind,found);
     };tick();
   }
-  window.__finalChooseChecks=function(id){
-    const l=safe(id),m=document.getElementById('meeting-interface');if(!l||!m)return;
-    const box=m.querySelector('.deal-final');const sub=document.createElement('div');sub.className='deal-sub';
-    sub.innerHTML='<h3>Что проверить?</h3><div class="deal-sub-photo">'+a8Visual(l.cat,30,l.emoji,l.sourceFile)+'</div><div class="deal-sub-actions">'+(authSupported(l)?'<button class="primary" onclick="window.__finalRun(\''+id+'\',\'auth\')">Проверить оригинальность</button>':'')+'<button class="primary" onclick="window.__finalRun(\''+id+'\',\'state\')">Проверить состояние</button><button onclick="this.parentElement.parentElement.remove()">Назад</button></div>';
-    box.appendChild(sub);
-  };
+  
   window.__finalRun=(id,kind)=>runOneCheck(id,kind);
   function getCheckState(c){c.finalChecks=c.finalChecks||{auth:null,state:null};return c.finalChecks;}
   window.__finalCheckResult=function(id,kind,found){
@@ -11702,15 +11767,8 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     sub.innerHTML=body;m.querySelector('.deal-final')?.appendChild(sub);
   };
-  window.__finalContinueAfterFraud=function(id){
-    const l=safe(id),c=a8GetChat(l,'buy');if(!l)return;const m=document.getElementById('meeting-interface');if(!m)return;
-    const sub=document.createElement('div');sub.className='deal-sub';sub.innerHTML='<h3>Обнаружен обман</h3><div class="deal-result bad">Можно потребовать скидку или отказаться от покупки.</div><div class="deal-sub-actions"><button class="primary" onclick="window.__finalDemandDiscount(\''+id+'\')">Требовать скидку</button><button onclick="window.__finalDecline(\''+id+'\')">Отказаться</button></div>';m.querySelector('.deal-final')?.appendChild(sub);
-  };
-  window.__finalDemandDiscount=function(id){
-    const l=safe(id),c=a8GetChat(l,'buy');if(!l)return;const reasons=c.finalFraudReasons||[];let pct=30;if(reasons.some(x=>/реплика|восстановлен/i.test(x)))pct=40;else if(reasons.length)pct=clamp(15+Math.floor(Math.random()*6),15,20);
-    c.dealPrice=Math.max(10,Math.round((c.dealPrice||l.price)*(1-pct/100)/10)*10);c.finalDiscount=pct;
-    window.__finalBuyConfirmed(id,true);
-  };
+  
+  
   function performPurchase(id){
     const l=safe(id),c=a8GetChat(l,'buy');if(!l)return;
     const fee=a8TravelCost(l.distance||0,c.dealPrice);const total=c.dealPrice+fee;
@@ -11721,9 +11779,9 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('meeting-interface')?.remove();a8PlayDeal();
     const u=document.createElement('div');u.className='deal-mini-confirm';u.innerHTML='<div style="text-align:center;font-size:18px;font-weight:900">🎉 Товар куплен!</div><div style="text-align:center;color:rgba(255,255,255,.55);margin-top:5px">'+l.title+'</div>';document.body.appendChild(u);setTimeout(()=>u.remove(),1100);
   }
-  window.__finalBuyConfirmed=function(id){performPurchase(id)};
-  window.__finalBuyNoCheck=function(id){performPurchase(id)};
-  window.__finalDecline=function(id){const l=safe(id);if(!l)return;const c=a8GetChat(l,'buy');c.blocked=true;c.awaitingMeetingTravel=false;document.getElementById('meeting-interface')?.remove();a8PushMsg(c,'sys','Вы отказались от сделки.');a8RenderChat(c,l);a8SaveState()};
+  
+  
+  
 
   /* ===== 7. Arrival hooks: no chat button can start a meeting ===== */
   function checkAllArrivals(){
@@ -13414,7 +13472,7 @@ try{
       c.pickupAttempt=2;c.missedNotifiedAt=Date.now();c.awaitingMeetingTravel=true;c.meetingResolved=false;c.blocked=false;c.completed=false;c.pickupState='second_chance';
       c.meetingDay=nd;c.meetingTime=nd*1440+nh*60+nm;c.meetingPlaceId=typeof mpPlaceId==='function'?mpPlaceId(place):c.meetingPlaceId;c.meetingSpot=typeof mpPlaceName==='function'?mpPlaceName(c.meetingPlaceId):place;c.pickupCity=city;
       if(typeof a8PushMsg==='function'){
-        a8PushMsg(c,'bot','Ты не приехал на встречу. Я подождал, но больше ждать не мог. Ладно, дам последний шанс — встречаемся '+(typeof mpDateLabel==='function'?mpDateLabel(nd):('игровой день '+nd))+' в '+(typeof mpTime==='function'?mpTime(c.meetingTime):'12:00')+' в месте «'+c.meetingSpot+'». Это последний шанс.');
+        a8PushMsg(c,'bot','Ты не приехал на встречу. Я подождал, но больше ждать не мог. Ладно, дам последний шанс — встречаемся '+(typeof a8GameDateLabel==='function'?a8GameDateLabel(nd):String(nd))+' в '+(typeof mpTime==='function'?mpTime(c.meetingTime):'12:00')+' в месте «'+c.meetingSpot+'». Это последний шанс.');
       }
       if(typeof a8Toast==='function')a8Toast('⚠️ Продавец дал последний шанс');
     }else{
@@ -13520,10 +13578,13 @@ try{
 <script id="a8-gamedatelabel-fix">
 window.a8GameDateLabel = function(day){
   try{
-    if (typeof mpDateLabel === 'function') return mpDateLabel(day);
-    if (typeof fpDateLabel === 'function') return fpDateLabel(day);
+    var n = Number(day || 1);
+    var d = (typeof mpDate === 'function') ? mpDate(n)
+      : (typeof fpDate === 'function') ? fpDate(n)
+      : new Date(2026, 8, 8 + n - 1);
+    return d.toLocaleDateString('ru-RU', { day:'numeric', month:'long' });
   }catch(e){}
-  return 'игровой день ' + day;
+  return String(day || 1);
 };
 </script>
 
@@ -13991,11 +14052,7 @@ var style=document.createElement('style');style.textContent=`
     const l=byId(id),c=chat(l);if(!l||!c)return;const reasons=c.finalFraudReasons||[];let pct=30;if(reasons.some(x=>/реплика|восстановлен/i.test(x)))pct=40;else pct=clamp(15+Math.floor(Math.random()*6),15,20);
     c.dealPrice=Math.max(10,Math.round((c.dealPrice||l.price)*(1-pct/100)/10)*10);c.finalDiscount=pct;try{a8SaveState()}catch(e){};window.__finalBuyConfirmed(id);
   };
-  window.__finalBuyConfirmed=function(id){
-    const l=byId(id),c=chat(l);if(!l||!c)return;const m=document.getElementById('meeting-interface');if(!m)return;
-    if(m.querySelector('.a8-confirm'))return;
-    const q=document.createElement('div');q.className='a8-confirm';q.innerHTML='<b style="font-size:18px">Подтвердить покупку?</b><div style="margin-top:5px;color:#9da3b1">'+esc(l.title||'Товар')+' · '+fmt(c.dealPrice||l.price)+'</div><button style="background:#fff;color:#111" onclick="window.__finalBuyConfirmedDo('+JSON.stringify(String(id))+')">Купить</button><button style="background:rgba(255,255,255,.08);color:#fff" onclick="this.parentElement.remove()">Назад</button>';m.querySelector('.a8-deal-shell').appendChild(q);
-  };
+  
   window.__finalBuyConfirmedDo=function(id){
     const m=document.getElementById('meeting-interface');if(m)m.querySelector('.a8-confirm')?.remove();
     /* Use the existing purchase implementation, which updates inventory, balance,
@@ -15212,7 +15269,7 @@ window.a8PublishListing=function(){
 window.a8SpawnBuyerMessage=function(silent){
   const candidates=a8State.myListings.filter(l=>{const c=a8State.chats[l.id+':sell'];return !c||(!c.completed&&!c.blocked&&!c.awaitingFulfillment)});if(!candidates.length)return false;
   const l=a8Pick(candidates),c=a8GetChat(l,'sell');applyMarket(l,true);
-  const fairMax=l.marketMax||l.price, hardCap=l.marketCap||round10(fairMax*1.5);
+  const fairMax=Math.max(10,Number(l.marketMax||l.marketMid||l.marketMin)||0), hardCap=l.marketCap||round10(fairMax*1.5);
   if(!c.started){c.started=true;const descFactor=l.descBonus||1;const low=Math.max(10,Math.min(fairMax,Math.round(fairMax*a8Rand(.65,.92)*descFactor/10)*10));c.current=low;c.dealPrice=low;c.marketMax=hardCap;
     a8PushMsg(c,'bot',a8Pick(A8_BUYER_OPENERS).replace('{title}',l.title).replace('{price}',a8Fmt(low)));
   }else a8PushMsg(c,'bot',a8Pick(A8_BUYER_FOLLOWUPS));
@@ -15221,14 +15278,7 @@ window.a8SpawnBuyerMessage=function(silent){
 
 /* Replace the custom sell-offer handler so NPCs refuse prices above the
    150% market ceiling and negotiate around market value. */
-window.a8HandleSellOffer=function(chat,l,val){
-  const market=l.marketMax||l.max||l.price, cap=l.marketCap||round10(market*1.5);a8PushMsg(chat,'me','Отдам за '+a8Fmt(val)+'.');
-  if(val>cap){a8PushMsg(chat,'bot','Слишком дорого. Я смотрю рыночную цену — выше '+a8Fmt(cap)+' не возьму.');return}
-  const fair=Math.min(market,Math.max(10,chat.current||market));
-  const liq=l.liquidity||1;if(val<=fair){const accept=Math.random()<Math.min(.96,.72+.20*liq);if(accept){chat.dealPrice=val;chat.current=val;a8PushMsg(chat,'bot',a8Pick(A8_BUYER_ACCEPT).replace('{price}',a8Fmt(val)));}else a8PushMsg(chat,'bot',a8Pick(A8_BUYER_HESITATE));return}
-  const gap=(val-market)/Math.max(1,market);if(val<=market*1.08&&Math.random()<Math.max(.1,.72-gap)){chat.dealPrice=val;chat.current=val;a8PushMsg(chat,'bot',a8Pick(A8_BUYER_ACCEPT).replace('{price}',a8Fmt(val)));}
-  else {const counter=round10(Math.min(market,Math.max(fair,(fair+Math.min(val,market))/2)));chat.current=counter;a8PushMsg(chat,'bot',a8Pick(A8_BUYER_COUNTER).replace('{price}',a8Fmt(counter)));}
-};
+
 
 /* Messages: newest conversations first, with fixed top filters. */
 let msgFilter='all',msgSeq=1;const msgSeen=new Map();
@@ -15238,7 +15288,12 @@ window.a8RenderMessages=function(){
   const all=Object.values(a8State.chats).filter(c=>c.log&&c.log.length);all.forEach(c=>{const k=c.listingId+':'+c.mode,s=msgKey(c);if(msgSeen.get(k)!==s){msgSeen.set(k,s);c.__msgOrder=msgSeq++;}if(!c.__msgOrder)c.__msgOrder=0;});
   const filtered=all.filter(c=>msgFilter==='all'||c.mode===msgFilter).sort((a,b)=>(b.__msgOrder||0)-(a.__msgOrder||0));
   empty.style.display=all.length?'none':'flex';
-  list.innerHTML='<div class="a8-msg-top-filters"><button class="'+(msgFilter==='sell'?'active':'')+'" onclick="window.__a8MsgFilter(\'sell\')">Продаю</button><button class="'+(msgFilter==='buy'?'active':'')+'" onclick="window.__a8MsgFilter(\'buy\')">Покупаю</button></div>'+(filtered.length?filtered.map(c=>a8MsgThreadHTML(c)).join(''):'<div class="a8-msg-filter-empty">В этом разделе пока нет чатов</div>');
+  /* BUGFIX: this used to render top "Продаю"/"Покупаю" filter buttons.
+     Removed per request — the interface should show one combined list,
+     same as the actual final renderer (render9) already does. This
+     function is legacy/superseded anyway, but left neutralized instead
+     of deleted so nothing here can ever show the old buttons again. */
+  list.innerHTML=(filtered.length?filtered.map(c=>a8MsgThreadHTML(c)).join(''):'<div class="a8-msg-filter-empty">В этом разделе пока нет чатов</div>');
   a8InitSwipeRows();
 };
 window.__a8MsgFilter=function(v){msgFilter=v;window.a8RenderMessages()};
@@ -15272,8 +15327,16 @@ try{if(typeof window.a8RenderMessages==='function')window.a8RenderMessages()}cat
 */
 (function(){
   function num(v){return Math.round(Number(v)||0)}
+  /* BUGFIX: buyer pricing used to fall back to l.price (the seller's own
+     asking price) whenever marketMax/max weren't set, and could bottom out
+     at 0 if none of those were valid numbers. Buyers must only reason about
+     the item's real market value, never the listing price, so this now
+     reads marketMid/marketMax/marketMin only and always floors at 10. */
+  function marketValueFor(l){
+    return Math.max(10, num(l.marketMid||l.marketMax||l.marketMin));
+  }
   function buyerMaxFor(l){
-    const market=Math.max(10, num(l.marketMax||l.max||l.price));
+    const market=marketValueFor(l);
     // Individual buyer ceiling: close to market, but never wildly above it.
     const mult=a8Rand ? a8Rand(1.02,1.22) : (1.02+Math.random()*.20);
     return Math.max(10, Math.round(market*mult/10)*10);
@@ -15283,7 +15346,7 @@ try{if(typeof window.a8RenderMessages==='function')window.a8RenderMessages()}cat
     if(!a8State.chats[key]){
       applyMarket(l,true);
       const factor=A8_BOT_FACTOR[l.botType]||0.8;
-      const market=Math.max(10,num(l.marketMax||l.max||l.price));
+      const market=marketValueFor(l);
       const max=buyerMaxFor(l);
       const start=Math.min(max,Math.max(10,Math.round(market*a8Rand(.72,.92)/10)*10));
       a8State.chats[key]={listingId:l.id,mode:'sell',log:[],rounds:0,current:start,floor:Math.round(start*.92),dealPrice:start,blocked:false,started:false,awaitingFulfillment:false,buyerMax:max,buyerId:suffix};
@@ -15318,7 +15381,7 @@ try{if(typeof window.a8RenderMessages==='function')window.a8RenderMessages()}cat
     const chat=makeBuyerChat(l,n);chat.buyerName=a8Pick(['Алексей','Максим','Илья','Дмитрий','Артём','Сергей','Никита','Антон','Егор','Михаил']);
     if(!chat.started){
       chat.started=true;
-      const market=Math.max(10,num(l.marketMax||l.max||l.price));
+      const market=marketValueFor(l);
       chat.current=Math.min(chat.buyerMax,Math.round(market*a8Rand(.72,.92)/10)*10);
       chat.dealPrice=chat.current;
       a8PushMsg(chat,'bot',a8Pick(A8_BUYER_OPENERS).replace('{title}',l.title).replace('{price}',a8Fmt(chat.current)));
@@ -15331,7 +15394,11 @@ try{if(typeof window.a8RenderMessages==='function')window.a8RenderMessages()}cat
   window.a8HandleSellOffer=function(chat,l,val){
     val=round10(val);applyMarket(l,true);
     const buyerMax=chat.buyerMax||buyerMaxFor(l);chat.buyerMax=buyerMax;
-    a8PushMsg(chat,'me','Отдам за '+a8Fmt(val)+'.');
+    /* BUGFIX: this chat is the SELLER (the player) naming a price to a
+       BUYER, so the player's own line must not say "I offer to buy" —
+       that was backwards and made it look like the negotiation was
+       broken/pointless. Wording only, mechanics unchanged. */
+    a8PushMsg(chat,'me','Уступлю за '+a8Fmt(val)+'.');
     if(val>buyerMax){
       chat.blocked=true;chat.completed=true;chat.dealPrice=null;
       a8PushMsg(chat,'bot',a8Pick(['Слишком большая цена. Я дороже '+a8Fmt(buyerMax)+' не возьму.','Нет, это слишком дорого для рынка. Мой максимум — '+a8Fmt(buyerMax)+'.','За такую цену не буду брать. Для меня максимум '+a8Fmt(buyerMax)+'.']));
@@ -15339,7 +15406,7 @@ try{if(typeof window.a8RenderMessages==='function')window.a8RenderMessages()}cat
       setTimeout(()=>{if(typeof a8CloseChat==='function')a8CloseChat();},700);
       return;
     }
-    const market=Math.max(10,num(l.marketMax||l.max||l.price));
+    const market=marketValueFor(l);
     const fair=Math.min(buyerMax,Math.max(10,num(chat.current||market)));
     if(val<=fair){
       // A buyer willingly closes only near his own fair range; no "final price" cheat.
@@ -15434,8 +15501,10 @@ try{if(typeof window.a8RenderMessages==='function')window.a8RenderMessages()}cat
     });
     if(empty)empty.style.display=all.length?'none':'flex';
     const visible=filter==='all'?all:all.filter(x=>x.c.mode===filter);
-    const btn=(v,t)=>'<button class="a8-msg-filter '+(filter===v?'active':'')+'" onclick="a8SetMsgFilter(\''+v+'\')">'+t+'</button>';
-    let html='<div class="a8-msg-filters">'+btn('buy','Покупаю')+btn('sell','Продаю')+'</div>';
+    /* BUGFIX: removed the "Продаю"/"Покупаю" top filter buttons per
+       request. This renderer is legacy/superseded by render9 anyway,
+       neutralized here so it can never show the old buttons either. */
+    let html='';
     html+=visible.map(({k,c})=>{
       const l=a8FindListing(c.listingId);if(!l)return '';
       const last=c.log[c.log.length-1];
@@ -15709,8 +15778,8 @@ function a8FixStaleDayLabels(){
         if(!m||typeof m.text!=='string')return;
         m.text=m.text.replace(/[Ии]гровой день\s*(\d+)/g,function(full,d){
           try{
+            if(typeof a8GameDateLabel==='function')return a8GameDateLabel(Number(d));
             if(typeof mpDateLabel==='function')return mpDateLabel(Number(d));
-            if(typeof fpDateLabel==='function')return fpDateLabel(Number(d));
           }catch(e){}
           return full;
         });
@@ -15995,8 +16064,11 @@ try{
     c.blocked=false;c.completed=false;c.purchaseLocked=false;c.awaitingMeetingTravel=false;c.awaitingFulfillment=false;c.awaitingInspectionChoice=false;c.meetingResolved=false;c.started=false;c.rounds=0;c.current=0;c.dealPrice=l.price;c.typingActive=false;c.revealed=0;c.__restartedAt=Date.now();
     c.log=[{who:'sys',text:'Чат начат заново за '+a8Fmt(RESTART_COST)+' ₽.'}];
     if(mode==='sell'){
-      c.buyerMax=c.buyerMax||Math.round((l.marketMax||l.max||l.price)*1.1/10)*10;
-      c.started=true;c.current=Math.min(c.buyerMax,Math.round((l.marketMax||l.max||l.price)*0.8/10)*10);c.dealPrice=c.current;
+      /* Base the restarted buyer's price on market value only, never the
+         listing's asking price, with a guaranteed minimum. */
+      var restartMarket=Math.max(10,Number(l.marketMid||l.marketMax||l.marketMin)||0);
+      c.buyerMax=c.buyerMax||Math.max(10,Math.round(restartMarket*1.1/10)*10);
+      c.started=true;c.current=Math.min(c.buyerMax,Math.max(10,Math.round(restartMarket*0.8/10)*10));c.dealPrice=c.current;
       a8PushMsg(c,'bot',a8Pick(A8_BUYER_OPENERS).replace('{title}',l.title).replace('{price}',a8Fmt(c.current)));
     }
     try{a8SaveState()}catch(e){} try{a8UpdateBalanceUI()}catch(e){} try{a8RenderMessages()}catch(e){}
@@ -16258,5 +16330,231 @@ setInterval(tick,150);
 #app-calendar .a8-v12-calendar-icon{width:60px!important;height:60px!important;min-width:60px!important;max-width:60px!important;display:flex!important;align-items:center!important;justify-content:center!important;box-sizing:border-box!important;border-radius:16px!important;background:linear-gradient(145deg,#7c5cff,#39267d)!important;color:#fff!important;font-size:0!important;line-height:0!important}
 #app-calendar .a8-v12-calendar-icon svg{width:34px!important;height:34px!important;display:block!important}
 </style>
+
+<script id="a8-explicit-buyer-message-rules-v7">
+(function(){
+'use strict';
+/*
+  BUYER MESSAGES — EXPLICIT GAME ACTION RULES
+  This version intentionally does NOT use real-world time and does NOT use
+  elapsed game-clock polling.
+  NOTE: the actual sleep/calendar buyer-batch triggers now live ONLY in
+  script #a8-guaranteed-buyer-events-v8 (single source of truth — having
+  two independent systems both hooked to the same sleep/calendar events
+  was causing duplicated batches and unreliable rendering). This script
+  now only keeps the random-spawn gate so nothing outside an explicit
+  batch can create a stray buyer message.
+*/
+
+/* Prevent legacy/random calls from creating messages. Real batches are
+   marked by __a8BuyerBatchActive. The wrapper still exposes the normal API,
+   but a background clock tick can no longer create a buyer by itself. */
+(function gateRandomSpawner(){
+  var original=window.a8SpawnBuyerMessage;
+  if(typeof original!=='function')return;
+  if(original.__a8ExplicitGate)return;
+  function gated(silent){
+    if(!window.__a8BuyerBatchActive)return false;
+    return original.call(this,!!silent);
+  }
+  gated.__a8ExplicitGate=true;
+  gated.__a8Original=original;
+  window.a8SpawnBuyerMessage=gated;
+})();
+
+})();
+</script>
+
+
+<script id="a8-guaranteed-buyer-events-v8">
+(function(){
+'use strict';
+/* GUARANTEED BUYER EVENTS V8 (hardened, single source of truth)
+   Do not use real time or elapsed-clock polling.
+   Sleep => exactly 3 buyer chats.
+   Calendar skip => exactly 5 buyer chats per skipped game day.
+   Each event is attached to one of the player's active listings and is stored
+   in a unique sell-chat, so it is visible in Messages -> Продаю.
+   This used to run alongside a second, independent system (in
+   #a8-explicit-buyer-message-rules-v7) that hooked the SAME two triggers —
+   that caused duplicated batches and, because failures were swallowed
+   silently, occasional "notification with no visible message" reports.
+   This is now the only system wired to sleep/calendar; failures are logged
+   instead of swallowed, and a listing is verified lookup-able (via
+   a8FindListing, exactly what the renderer uses) before a chat is created
+   for it, so a created chat is always guaranteed to render. */
+var eventSeq=0;
+function activeListings(){
+  var a=Array.isArray(a8State.myListings)?a8State.myListings:[];
+  return a.filter(function(l){return l && !l.sold && !l.archived && typeof a8FindListing==='function' && a8FindListing(l.id);});
+}
+function addBuyerMessage(){
+  var ls=activeListings();
+  if(!ls.length)return false;
+  var l=ls[eventSeq % ls.length]; eventSeq++;
+  var key=l.id+':sell:auto_'+Date.now()+'_'+eventSeq+'_'+Math.floor(Math.random()*100000);
+  /* BUGFIX: buyers were pricing off whatever was cached on the listing
+     (falling back through l.max/l.price), which could be stale or unset
+     and made "0 ₽" offers possible. Force a fresh market recompute and
+     base the offer ONLY on the item's real market value — never on the
+     seller's asking price — with a hard floor so it can never be 0/blank. */
+  try{ if(typeof applyMarket==='function') applyMarket(l,true); }catch(e){}
+  var market=Math.max(10,Number(l.marketMid||l.marketMax||l.marketMin)||0);
+  var price=Math.max(10,Math.round(market*.82/10)*10);
+  var names=['Алексей','Максим','Илья','Дмитрий','Артём','Сергей','Никита','Антон','Егор','Михаил','Роман','Кирилл'];
+  var openers=[
+    'Здравствуйте! Ещё продаёте «{title}»? Готов купить за {price} ₽.',
+    'Добрый день! Интересует «{title}». Можно купить?',
+    'Здравствуйте, объявление «{title}» ещё актуально?',
+    'Привет! Хочу купить «{title}». Сколько окончательно?',
+    'Добрый день! Готов забрать «{title}», если ещё продаёте.'
+  ];
+  var text=openers[Math.floor(Math.random()*openers.length)].replace('{title}',l.title||'товар').replace('{price}',typeof a8Fmt==='function'?a8Fmt(price):String(price));
+  var chat={
+    listingId:l.id,mode:'sell',log:[{who:'bot',text:text,time:Date.now()}],revealed:1,rounds:0,current:price,
+    floor:Math.round(price*.92),dealPrice:price,blocked:false,started:true,
+    awaitingFulfillment:false,buyerMax:Math.round(market*1.15/10)*10,
+    buyerId:'auto_'+eventSeq,buyerName:names[Math.floor(Math.random()*names.length)],
+    buyerCity:a8State.myCity,buyerAddress:'',__autoBuyer:true,__msgOrder:Date.now()+eventSeq
+  };
+  a8State.chats[key]=chat;
+  a8State.unread=(Number(a8State.unread)||0)+1;
+  return true;
+}
+function refreshMessagesUI(){
+  try{if(typeof a8UpdateMsgBadge==='function')a8UpdateMsgBadge();}catch(e){console.error('a8 buyer-events: badge refresh failed',e);}
+  try{if(typeof window.a8RenderMessages==='function')window.a8RenderMessages();}catch(e){console.error('a8 buyer-events: render failed',e);}
+  try{if(typeof a8SaveState==='function')a8SaveState();}catch(e){console.error('a8 buyer-events: save failed',e);}
+}
+function addBuyerBatch(n){
+  n=Math.max(0,Math.floor(Number(n)||0)); var made=0;
+  for(var i=0;i<n;i++){
+    try{ if(addBuyerMessage())made++; }
+    catch(e){ console.error('a8 buyer-events: failed to create buyer message',e); }
+  }
+  refreshMessagesUI();
+  /* Safety net: re-render/save once more shortly after, in case something
+     else (day-advance market refresh, etc.) touches the DOM/state right
+     after this batch and would otherwise clobber the fresh render. */
+  if(made>0) setTimeout(refreshMessagesUI,350);
+  if(made>0){try{if(typeof a8ShowNotification==='function')a8ShowNotification('Новые сообщения','Покупатели написали: '+made);}catch(e){console.error('a8 buyer-events: notification failed',e);}}
+  else console.warn('a8 buyer-events: batch requested '+n+' buyer(s) but none were created (no active listings?)');
+  return made;
+}
+window.__a8GuaranteedBuyerBatch=addBuyerBatch;
+
+/* SLEEP: observe the actual game sleep flag transition. This is independent
+   of how a8GoToSleep is exposed/wrapped and cannot confuse real time with game time. */
+var wasAsleep=!!a8State.asleep;
+setInterval(function(){
+  var now=!!a8State.asleep;
+  if(wasAsleep && !now){
+    /* one wake transition = one sleep event */
+    addBuyerBatch(3);
+  }
+  wasAsleep=now;
+},50);
+
+/* CALENDAR: capture the selected GAME DAY when the player taps the skip button.
+   The existing handler is allowed to run first; afterwards we compare the game
+   day and create 5 messages for every actual day jump. */
+document.addEventListener('click',function(e){
+  var b=e.target&&e.target.closest?e.target.closest('#a8-skip-time-day button'):null;
+  if(!b)return;
+  var before=Number(a8State.clockDay||1);
+  var selected=Number(window.__A8V5CalendarSelectedDay||before);
+  setTimeout(function(){
+    var after=Number(a8State.clockDay||before);
+    var days=Math.max(0,after-before);
+    if(days>0)addBuyerBatch(days*5);
+  },250);
+},true);
+})();
+</script>
+
+<script id="a8-messages-v9-hardfix">
+(function(){
+'use strict';
+/* FINAL MESSAGES UI HARD FIX
+   One renderer, delegated clicks, and unique sell-chat keys.
+   IMPORTANT: this script (and its style block right below) used to sit
+   AFTER the closing </body></html> tags. That's invalid placement — some
+   WebViews / in-app browsers (e.g. content:// file viewers) do not
+   reliably parse and run script tags found after </html>, so this
+   "final" renderer silently never took over, and the OLDER renderer
+   (further up, from a8-market-negotiation-hardfix-20260910) stayed
+   active instead. That older renderer runs a de-dupe/order step keyed
+   only by "listingId:mode" (no per-buyer distinction), which is why
+   several distinct auto-generated buyer chats for the same listing could
+   collapse into a single visual slot or otherwise fail to show up even
+   though a8State.chats genuinely had the new entries (matching the
+   notification always firing correctly). Moving this block back inside
+   <body>, before </body></html>, makes it load like every other script
+   here and guarantees it's the one actually in charge of the list. */
+var sellFilter='all';
+function esc9(v){return typeof esc==='function'?esc(v):String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]});}
+function render9(){
+  var list=document.getElementById('a8-msg-list'), empty=document.getElementById('a8-msg-empty');
+  if(!list||!window.a8State)return;
+  var entries=Object.entries(a8State.chats||{}).filter(function(x){return x[1]&&Array.isArray(x[1].log)&&x[1].log.length;});
+  entries.sort(function(a,b){return (Number(b[1].__msgOrder)||0)-(Number(a[1].__msgOrder)||0);});
+  var visible=entries;
+  if(empty)empty.style.display=entries.length?'none':'flex';
+  var head='<div class="a8-msg-section-title">💬 Все чаты</div>';
+  var body=visible.length?visible.map(function(x){
+    var key=x[0],c=x[1],l=a8FindListing(c.listingId);if(!l)return '';
+    var last=c.log[c.log.length-1]||{};
+    return '<div class="a8-swipe-row a8-v9-chat-row" data-a8-chat-key="'+esc9(key)+'">'+
+      '<button class="a8-swipe-delete" data-chat-key="'+esc9(key)+'">Удалить</button>'+
+      '<div class="a8-swipe-content a8-mylist-card" data-a8-open-chat="'+esc9(key)+'" style="cursor:pointer;touch-action:pan-y">'+
+      '<div class="a8-mylist-thumb">'+a8Visual(l.cat,22,l.emoji,l.sourceFile)+'</div>'+
+      '<div class="a8-mylist-info"><div class="a8-mylist-title">'+esc9(c.buyerName||'Покупатель')+'</div>'+ 
+      '<div class="a8-cart-price">'+esc9(l.title||'Объявление')+'</div>'+ 
+      '<div class="a8-cart-price" style="color:rgba(255,255,255,.5);">'+esc9(String(last.text||'').slice(0,70))+'</div></div></div></div>';
+  }).join(''):'<div class="a8-msg-filter-empty">В этом разделе пока нет чатов</div>';
+  list.innerHTML=head+body;
+  try{if(typeof a8InitSwipeRows==='function')a8InitSwipeRows();}catch(e){}
+}
+window.a8RenderMessages=render9;
+window.a8SetMsgFilter=function(v){sellFilter=(v==='sell'||v==='buy')?v:'all';render9();};
+window.__a8MsgFilter=window.a8SetMsgFilter;
+document.addEventListener('click',function(e){
+  var f=e.target.closest&&e.target.closest('[data-a8-msg-filter]');
+  if(f){e.preventDefault();e.stopPropagation();window.a8SetMsgFilter(f.getAttribute('data-a8-msg-filter'));return;}
+  /* BUGFIX: render9 (this file's actual, final message-list renderer —
+     it's the one assigned to window.a8RenderMessages last, so every other
+     renderer in this document is dead code) used to render each chat row
+     with ONLY a touch-swipe-to-delete gesture and no visible delete
+     control. On a mouse/desktop session (or any WebView where the
+     synthetic swipe doesn't register as a clean horizontal drag) there
+     was therefore no way to actually delete a chat at all — clicking just
+     reopens it. That's why "deleted" chats always reappeared after
+     reopening the file: they were never actually removed from
+     a8State.chats/localStorage in the first place. A real "Удалить"
+     button (added above in render9) plus this click handler fixes that,
+     and both paths call the same a8DeleteChat(), which already persists
+     via a8SaveState(). */
+  var delBtn=e.target.closest&&e.target.closest('.a8-swipe-delete');
+  if(delBtn){e.preventDefault();e.stopPropagation();var dk=delBtn.getAttribute('data-chat-key');if(dk&&typeof window.a8DeleteChat==='function')window.a8DeleteChat(dk);return;}
+  var row=e.target.closest&&e.target.closest('[data-a8-open-chat]');
+  if(row){e.preventDefault();e.stopPropagation();var k=row.getAttribute('data-a8-open-chat');var c=a8State.chats[k];
+    if(c&&c.mode==='sell'&&typeof window.a8OpenBuyerChat==='function')window.a8OpenBuyerChat(k);
+    else if(c&&typeof window.a8OpenChat==='function')window.a8OpenChat(c.listingId,c.mode);
+  }
+},true);
+/* Re-render whenever the messages panel becomes visible. */
+document.addEventListener('click',function(e){
+  var nav=e.target.closest&&e.target.closest('[data-panel="msg"]');
+  if(nav)setTimeout(render9,0);
+},true);
+setTimeout(render9,0);
+window.addEventListener('a8:messages-updated',render9);
+})();
+</script>
+
+<style id="a8-messages-v9-css">
+.a8-v9-filters{pointer-events:auto!important}.a8-v9-filters button{pointer-events:auto!important;position:relative;z-index:20}.a8-v9-chat-row{position:relative}.a8-v9-chat-row .a8-swipe-content{position:relative;z-index:2;pointer-events:auto}
+</style>
+
 </body>
 </html>
