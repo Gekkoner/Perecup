@@ -3415,6 +3415,11 @@
 .verification-progress-big::before{content:""!important;position:absolute!important;inset:0!important;width:100%!important;height:100%!important;background:#fff!important;border-radius:999px!important;transform:scaleX(0)!important;transform-origin:left center!important;animation:a8V8FillLeftToRight 5s linear forwards!important;z-index:2!important;box-shadow:0 0 10px rgba(255,255,255,.45)!important}
 .verification-progress-big>div{visibility:hidden!important}
 </style>
+
+<style id="a8-remove-calendar-skip-time-button">
+/* Calendar: hide the temporary "Пропустить время" control. */
+#a8-skip-time-day { display: none !important; }
+</style>
 </head>
 <body>
 <div class="phone" id="phone">
@@ -4469,34 +4474,8 @@ const A8_PRODUCT_IMAGES = {
   });
 
   function lockOpenCityPicker() {
-    // If the name field's keyboard is still open, blurring it first can
-    // eat the very same tap on some mobile browsers/webviews (the tap just
-    // dismisses the keyboard instead of also opening the sheet below it).
-    // Deferring the actual open avoids that race — but a fixed 60ms guess
-    // isn't enough: the real on-screen-keyboard dismiss animation on phones
-    // often takes 250-300ms+, so the sheet was popping open while the
-    // keyboard still covered the city list/"Отмена" button underneath it,
-    // making taps land on the keyboard instead of a city. We now wait for
-    // the viewport to actually resize back (keyboard closed), with a
-    // generous timeout as a fallback for browsers without visualViewport
-    // or where the resize event doesn't fire.
-    const wasFocused = document.activeElement === lockInput;
-    lockInput.blur();
-    const openModal = () => document.getElementById('lock-city-modal').classList.add('open');
-    if (!wasFocused) { openModal(); return; }
-    if (window.visualViewport) {
-      let opened = false;
-      const finish = () => {
-        if (opened) return;
-        opened = true;
-        window.visualViewport.removeEventListener('resize', finish);
-        openModal();
-      };
-      window.visualViewport.addEventListener('resize', finish);
-      setTimeout(finish, 350);
-    } else {
-      setTimeout(openModal, 350);
-    }
+    if (document.activeElement === lockInput) lockInput.blur();
+    document.getElementById('lock-city-modal').classList.add('open');
   }
   function lockCloseCityPicker() {
     document.getElementById('lock-city-modal').classList.remove('open');
@@ -8453,6 +8432,7 @@ const A8_PRODUCT_IMAGES = {
   };
   let kbCardNumber = null;
   let kbPendingDesign = 'midnight';
+  let kbAdCooldownUntil = 0;
 
   // Основные категории Авито. match() проверяет, попадает ли товар
   // (по его листинговой категории, напр. "Электроника/Смартфоны") в эту
@@ -8627,6 +8607,7 @@ const A8_PRODUCT_IMAGES = {
       '<div class="kb-actions">' +
         '<button class="kb-action-btn" onclick="a8Toast(\'Пополнение пока недоступно\')">+ Пополнить</button>' +
         '<button class="kb-action-btn" onclick="a8Toast(\'Переводы пока недоступны\')">↑ Перевести</button>' +
+        '<button class="kb-action-btn" onclick="kbOpenEarn()">💰 Заработать</button>' +
       '</div>' +
       '<div class="kb-blocks">' +
         '<div class="kb-block"><div class="kb-block-title">Счёт кэшбека</div><div class="kb-block-value">' + a8Fmt(bank.cashbackBalance || 0) + '</div><div class="kb-block-sub">Пока нельзя тратить</div></div>' +
@@ -8641,6 +8622,28 @@ const A8_PRODUCT_IMAGES = {
         '<div class="kb-history-row-title">История операций</div>' +
         '<div class="kb-history-chevron">›</div>' +
       '</div>';
+  }
+
+  function kbOpenEarn() {
+    if (Date.now() < kbAdCooldownUntil) {
+      a8Toast('Подождите ' + Math.ceil((kbAdCooldownUntil-Date.now())/1000) + ' сек.');
+      return;
+    }
+    const root=document.getElementById('kb-root');
+    const ov=document.createElement('div');
+    ov.id='kb-ad-modal';
+    ov.style.cssText='position:absolute;inset:0;z-index:999;background:rgba(0,0,0,.78);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;padding:22px;';
+    ov.innerHTML='<div style="background:linear-gradient(180deg,#20212b,#111116);border:1px solid rgba(124,92,255,.35);box-shadow:0 20px 60px #000;border-radius:30px;padding:34px 24px 24px;text-align:center;color:#fff;width:min(390px,100%);transform:translateY(0)"><div style="font-size:52px;margin-bottom:12px">💰</div><div style="font-size:30px;font-weight:900;letter-spacing:-1px">Заработать</div><div style="font-size:18px;line-height:1.45;color:rgba(255,255,255,.72);margin:14px 0 26px">Посмотрите короткую рекламу<br>и получите <b style="color:#fff">+1000 ₽</b></div><button onclick="kbShowAd()" style="width:100%;border:0;border-radius:20px;padding:17px;background:linear-gradient(135deg,#7c5cff,#2d9cff);color:#fff;font-size:17px;font-weight:850">▶ Смотреть рекламу</button></div>';
+    root.appendChild(ov);
+  }
+  function kbShowAd() {
+    const x=document.getElementById('kb-ad-modal'); if(x)x.remove();
+    kbAdCooldownUntil=Date.now()+10000;
+    const ad=document.createElement('div'); ad.id='kb-ad-full';
+    ad.style.cssText='position:absolute;inset:0;z-index:1000;background:#000;display:flex;align-items:center;justify-content:center;color:#fff;text-align:center;font-weight:800;';
+    ad.innerHTML='<div style="font-size:22px;line-height:1.5"><div style="font-size:14px;color:#888;margin-bottom:14px">Реклама</div><div style="font-size:28px">Тгк - @ReMarketo</div><div id="kb-ad-timer" style="margin-top:35px;color:#aaa;font-size:16px">5 сек</div></div><button id="kb-ad-close" style="display:none;position:absolute;right:20px;top:20px;width:42px;height:42px;border-radius:50%;border:0;background:rgba(255,255,255,.15);color:#fff;font-size:24px">✕</button>';
+    document.getElementById('kb-root').appendChild(ad);
+    let t=5; const timer=setInterval(()=>{t--; const el=document.getElementById('kb-ad-timer'); if(el)el.textContent=t+' сек'; if(t<=0){clearInterval(timer); const b=document.getElementById('kb-ad-close'); if(b){b.style.display='block';b.onclick=()=>{a8State.balance+=1000;a8SaveState();a8UpdateBalanceUI();ad.remove();kbRenderMain();a8Toast('+1000 ₽ за просмотр рекламы');}}}},1000);
   }
 
   function kbRenderCashbackCategories() {
@@ -13100,7 +13103,7 @@ function fpTime(abs){const n=((Number(abs)||0)%1440+1440)%1440;return String(Mat
 function fpScheduleLocal(id){
   const l=fpListing(id);if(!l)return;
   const c=fpChat(l);if(!c)return;
-  const day=fpToday()+1+Math.floor(Math.random()*2);
+  const day=fpToday()+Math.floor(Math.random()*2);
   const hour=10+Math.floor(Math.random()*10);
   const mins=hour*60;
   c.inspectionMethod='pickup';
@@ -13508,7 +13511,7 @@ function mpPlanner(id,crossCity){
 /* ----- Same-city seller chooses date/place automatically; no fake location. ----- */
 function mpLocalPickup(id){
   const l=mpListing(id);if(!l)return;const c=mpBuyChat(l);if(!c)return;
-  const day=mpNowDay()+1+Math.floor(Math.random()*2),place=MP_PICKUP[Math.floor(Math.random()*MP_PICKUP.length)];
+  const day=mpNowDay()+Math.floor(Math.random()*2),place=MP_PICKUP[Math.floor(Math.random()*MP_PICKUP.length)];
   c.inspectionMethod='pickup';c.inspectionResolved=false;c.awaitingInspectionChoice=false;c.meetingResolved=false;c.blocked=false;c.awaitingMeetingTravel=true;c.awaitingFulfillment=false;c.crossCityMeeting=false;c.meetingDay=day;c.meetingTime=day*1440;c.meetingPlaceId=place;c.meetingSpot=mpPlaceName(place);c.pickupState='scheduled';c.pickupNotificationReady=false;c.pickupCity=l.city||a8State.myCity;c.pickupCreatedAt=Date.now();
   try{a8PushMsg(c,'me','Выбираю самовывоз.');a8PushMsg(c,'bot','Договорились. Жду вас '+mpDateLabel(day)+' в месте «'+mpPlaceName(place)+'». Место встречи отмечено в «Картах» и «Календаре». Время не назначается. Когда будете на месте, придёт уведомление «Провести сделку».');a8SaveState();a8RenderChat(c,l)}catch(e){}
   mpRefreshChat();
@@ -17202,5 +17205,280 @@ try{
 }catch(e){}
 })();
 </script>
+</body>
+</html>
+
+
+<style id="a8-selfpickup-first-window-redesign">
+/* =========================================================
+   SELF-PICKUP / DEAL FIRST WINDOW — VISUAL REDESIGN
+   Только визуальный слой. Все существующие onclick/JS действия
+   кнопок сохранены без изменения.
+   ========================================================= */
+
+html body #meeting-interface.a8-real-deal{
+  background:
+    radial-gradient(900px 520px at 50% -10%, rgba(67,102,255,.18), transparent 62%),
+    #07080b !important;
+  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont,
+               "SF Pro Display", "Segoe UI", sans-serif !important;
+}
+
+html body #meeting-interface.a8-real-deal .a8-deal-shell{
+  width:min(100%, 430px) !important;
+  padding:calc(14px + env(safe-area-inset-top)) 16px calc(12px + env(safe-area-inset-bottom)) !important;
+  background:
+    radial-gradient(500px 300px at 50% 0%, rgba(82,107,255,.10), transparent 70%),
+    linear-gradient(180deg,#11131a 0%,#08090d 58%,#06070a 100%) !important;
+  gap:10px !important;
+}
+
+/* Header */
+html body #meeting-interface.a8-real-deal .a8-deal-top{
+  min-height:42px !important;
+  margin:0 2px !important;
+  font-size:22px !important;
+  letter-spacing:-.55px !important;
+}
+html body #meeting-interface.a8-real-deal .a8-deal-top span:first-child::after{
+  content:"Получение товара";
+  display:block;
+  margin-top:4px;
+  color:rgba(255,255,255,.40);
+  font-size:10px;
+  font-weight:650;
+  letter-spacing:.1px;
+}
+html body #meeting-interface.a8-real-deal .a8-deal-top span:first-child{
+  font-size:0;
+}
+html body #meeting-interface.a8-real-deal .a8-deal-top span:first-child::before{
+  content:"Сделка";
+  font-size:22px;
+  font-weight:900;
+  letter-spacing:-.55px;
+}
+html body #meeting-interface.a8-real-deal .a8-deal-top span:last-child{
+  width:38px;height:38px;
+  display:flex;align-items:center;justify-content:center;
+  border-radius:13px;
+  background:rgba(255,255,255,.075);
+  border:1px solid rgba(255,255,255,.08);
+  font-size:18px;
+}
+
+/* Main product card */
+html body #meeting-interface.a8-real-deal .a8-deal-card{
+  margin:0 !important;
+  padding:10px !important;
+  border-radius:24px !important;
+  background:linear-gradient(180deg,rgba(255,255,255,.075),rgba(255,255,255,.035)) !important;
+  border:1px solid rgba(255,255,255,.10) !important;
+  box-shadow:
+    0 18px 55px rgba(0,0,0,.34),
+    inset 0 1px 0 rgba(255,255,255,.045) !important;
+  scrollbar-width:none;
+}
+html body #meeting-interface.a8-real-deal .a8-deal-card::-webkit-scrollbar{display:none}
+
+html body #meeting-interface.a8-real-deal .a8-deal-image{
+  height:clamp(175px,25vh,245px) !important;
+  max-height:245px !important;
+  min-height:175px !important;
+  margin:0 0 13px !important;
+  border-radius:18px !important;
+  background:
+    radial-gradient(circle at 50% 38%,rgba(255,255,255,.10),transparent 52%),
+    #0d0f14 !important;
+  border:1px solid rgba(255,255,255,.07) !important;
+}
+html body #meeting-interface.a8-real-deal .a8-deal-image::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  border-radius:18px;
+  box-shadow:inset 0 0 45px rgba(0,0,0,.22);
+  pointer-events:none;
+}
+html body #meeting-interface.a8-real-deal .a8-deal-image img,
+html body #meeting-interface.a8-real-deal .a8-deal-image .a8-vis-photo{
+  object-fit:contain !important;
+  padding:10px !important;
+}
+
+/* Product typography */
+html body #meeting-interface.a8-real-deal .a8-deal-name{
+  font-size:20px !important;
+  line-height:1.18 !important;
+  font-weight:850 !important;
+  letter-spacing:-.35px !important;
+  color:#fff !important;
+}
+html body #meeting-interface.a8-real-deal .a8-deal-price{
+  margin-top:7px !important;
+  font-size:26px !important;
+  line-height:1 !important;
+  font-weight:950 !important;
+  letter-spacing:-.8px !important;
+}
+html body #meeting-interface.a8-real-deal .a8-deal-seller{
+  margin-top:8px !important;
+  font-size:12.5px !important;
+  font-weight:650 !important;
+  color:rgba(255,255,255,.50) !important;
+}
+html body #meeting-interface.a8-real-deal .a8-deal-seller::before{
+  content:"Продавец  ·  ";
+  color:rgba(255,255,255,.30);
+}
+
+/* Characteristic chips */
+html body #meeting-interface.a8-real-deal .a8-deal-specs{
+  grid-template-columns:repeat(2,minmax(0,1fr)) !important;
+  gap:7px !important;
+  margin-top:11px !important;
+}
+html body #meeting-interface.a8-real-deal .a8-spec{
+  padding:9px 10px !important;
+  min-height:49px !important;
+  border-radius:13px !important;
+  background:rgba(255,255,255,.045) !important;
+  border:1px solid rgba(255,255,255,.065) !important;
+}
+html body #meeting-interface.a8-real-deal .a8-spec small{
+  font-size:9px !important;
+  text-transform:uppercase;
+  letter-spacing:.35px;
+  color:rgba(255,255,255,.34) !important;
+}
+html body #meeting-interface.a8-real-deal .a8-spec b{
+  margin-top:5px !important;
+  font-size:12px !important;
+  line-height:1.15 !important;
+}
+
+/* Action area */
+html body #meeting-interface.a8-real-deal .a8-deal-actions{
+  gap:8px !important;
+  padding:2px 0 0 !important;
+  margin:0 !important;
+}
+html body #meeting-interface.a8-real-deal .a8-deal-actions button{
+  position:relative !important;
+  min-height:58px !important;
+  height:58px !important;
+  max-height:none !important;
+  padding:0 17px 0 52px !important;
+  border-radius:17px !important;
+  text-align:left !important;
+  font-size:14px !important;
+  font-weight:850 !important;
+  letter-spacing:-.1px !important;
+  box-shadow:none !important;
+  transition:transform .12s ease,filter .12s ease,background .12s ease !important;
+}
+html body #meeting-interface.a8-real-deal .a8-deal-actions button:active{
+  transform:scale(.985) !important;
+  filter:brightness(.94);
+}
+html body #meeting-interface.a8-real-deal .a8-btn-check{
+  background:linear-gradient(135deg,#ffffff,#e9ecf4) !important;
+  color:#0c0e13 !important;
+  box-shadow:0 8px 22px rgba(255,255,255,.10) !important;
+}
+html body #meeting-interface.a8-real-deal .a8-btn-buy{
+  background:linear-gradient(180deg,rgba(255,255,255,.115),rgba(255,255,255,.075)) !important;
+  color:#fff !important;
+  border:1px solid rgba(255,255,255,.08) !important;
+}
+html body #meeting-interface.a8-real-deal .a8-btn-cancel{
+  min-height:48px !important;
+  height:48px !important;
+  background:rgba(255,85,92,.075) !important;
+  color:#ff969b !important;
+  border:1px solid rgba(255,85,92,.10) !important;
+}
+
+/* Button icons via CSS so no JS/onclick changes */
+html body #meeting-interface.a8-real-deal .a8-btn-check::before,
+html body #meeting-interface.a8-real-deal .a8-btn-buy::before,
+html body #meeting-interface.a8-real-deal .a8-btn-cancel::before{
+  position:absolute;
+  left:17px; top:50%;
+  transform:translateY(-50%);
+  width:25px;height:25px;
+  display:flex;align-items:center;justify-content:center;
+  border-radius:9px;
+  font-size:13px;
+  font-weight:900;
+}
+html body #meeting-interface.a8-real-deal .a8-btn-check::before{
+  content:"✓";
+  background:#11141a;
+  color:#fff;
+}
+html body #meeting-interface.a8-real-deal .a8-btn-buy::before{
+  content:"₽";
+  background:rgba(255,255,255,.12);
+  color:#fff;
+}
+html body #meeting-interface.a8-real-deal .a8-btn-cancel::before{
+  content:"×";
+  background:rgba(255,255,255,.07);
+  color:#ff969b;
+}
+
+/* Secondary check screens */
+html body #meeting-interface.a8-real-deal .a8-layer-content{
+  background:
+    radial-gradient(600px 350px at 50% 0%,rgba(67,102,255,.12),transparent 65%),
+    #08090d !important;
+  padding:calc(18px + env(safe-area-inset-top)) 18px calc(14px + env(safe-area-inset-bottom)) !important;
+}
+html body #meeting-interface.a8-real-deal .a8-layer-head h3,
+html body #meeting-interface.a8-real-deal .a8-result-center h3{
+  font-size:23px !important;
+  letter-spacing:-.45px !important;
+}
+html body #meeting-interface.a8-real-deal .a8-layer-head p{
+  font-size:13px !important;
+  color:rgba(255,255,255,.48) !important;
+}
+html body #meeting-interface.a8-real-deal .a8-check-btn{
+  min-height:56px !important;
+  border-radius:16px !important;
+  font-size:14px !important;
+  font-weight:850 !important;
+}
+html body #meeting-interface.a8-real-deal .a8-progressbar{
+  height:10px !important;
+  border-radius:99px !important;
+  background:rgba(255,255,255,.08) !important;
+}
+html body #meeting-interface.a8-real-deal .a8-progressbar i{
+  border-radius:99px !important;
+  background:linear-gradient(90deg,#6b7cff,#2b7bff) !important;
+  box-shadow:0 0 18px rgba(64,104,255,.35);
+}
+html body #meeting-interface.a8-real-deal .a8-check-result{
+  padding:15px !important;
+  border-radius:16px !important;
+  font-size:13px !important;
+}
+
+/* Small phones */
+@media (max-width:380px){
+  html body #meeting-interface.a8-real-deal .a8-deal-image{
+    height:190px !important;
+    min-height:150px !important;
+  }
+  html body #meeting-interface.a8-real-deal .a8-deal-name{font-size:18px !important;}
+  html body #meeting-interface.a8-real-deal .a8-deal-price{font-size:23px !important;}
+  html body #meeting-interface.a8-real-deal .a8-deal-actions button{
+    min-height:53px !important;height:53px !important;
+  }
+}
+</style>
+
 </body>
 </html>
